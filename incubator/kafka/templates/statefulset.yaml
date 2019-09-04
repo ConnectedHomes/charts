@@ -56,6 +56,32 @@ spec:
       nodeSelector:
 {{ toYaml .Values.nodeSelector | indent 8 }}
 {{- end }}
+      initContainers:
+      - name: init-zookeeper
+        image: {{ printf "%s:%s" .Values.image .Values.imageTag | quote }}
+        env:
+        - name: ZOOKEEPER_ADDRESS
+          value: {{ include "zookeeper.url" . | quote }}
+        - name: ZOOKEEPER_PATH
+          value: {{ printf "/%s" uuidv4 | quote }}
+        - name: SLEEP_INTERVAL
+          value: "5"
+        command:
+          - sh
+          - -ec
+          - |
+            check_zookeeper() {
+            zookeeper-shell $ZOOKEEPER_ADDRESS create $ZOOKEEPER_PATH null \
+            > /dev/null 2>&1 && \
+            zookeeper-shell $ZOOKEEPER_ADDRESS delete $ZOOKEEPER_PATH \
+            > /dev/null 2>&1
+            }
+            until check_zookeeper
+            do
+            echo "Waiting for Zookeeper..."
+            sleep $SLEEP_INTERVAL
+            done
+            echo "Zookeeper is ready!"
       containers:
       {{- if .Values.prometheus.jmx.enabled }}
       - name: metrics
