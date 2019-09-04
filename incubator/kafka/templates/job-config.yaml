@@ -1,9 +1,9 @@
 {{- if .Values.topics -}}
-{{- $scriptHash := include (print $.Template.BasePath "/configmap-config.yaml") . | sha256sum | trunc 8 -}}
+{{- $zk := include "zookeeper.url" . -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: "{{ template "kafka.fullname" . }}-config-{{ $scriptHash }}"
+  name: "{{ template "kafka.fullname" . }}-config"
   labels:
     app: {{ template "kafka.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
@@ -18,16 +18,61 @@ spec:
         release: "{{ .Release.Name }}"
     spec:
       restartPolicy: OnFailure
-      volumes:
-        - name: config-volume
-          configMap:
-            name: {{ template "kafka.fullname" . }}-config
-            defaultMode: 0744
       containers:
         - name: {{ template "kafka.fullname" . }}-config
           image: "{{ .Values.image }}:{{ .Values.imageTag }}"
-          command: ["/usr/local/script/runtimeConfig.sh"]
-          volumeMounts:
-            - name: config-volume
-              mountPath: "/usr/local/script"
-{{- end -}}
+          env:
+          - name: ZOOKEEPER_ADDRESS
+            value: {{ include "zookeeper.url" . }}
+          - name: SLEEP_INTERVAL
+            value: "5"
+          command:
+          - bash
+          - -ec
+          - |
+            cd /usr/bin
+            broker_count() {
+            zookeeper-shell $ZOOKEEPER_ADDRESS ls /brokers/ids 2> /dev/null | tail -1 | sed -e 's;[^0-9 ];;g' | wc -w
+            }
+            echo "Applying runtime configuration..."
+            {{- range $n, $topic := .Values.topics }}
+            echo Need at least {{ $topic.replicationFactor }} brokers for topic {{ $topic.name }}
+            while (( $(broker_count) < "{{ $topic.replicationFactor }}" ))
+            do
+            echo "Waiting for more brokers..."
+            sleep $SLEEP_INTERVAL
+            done
+            echo Brokers are ready!
+            {{- if and $topic.partitions $topic.replicationFactor $topic.reassignPartitions }}
+            cat << EOF > {{ $topic.name }}-increase-replication-factor.json
+            {"version":1, "partitions":[
+            {{- $partitions := (int $topic.partitions) }}
+            {{- $replicas := (int $topic.replicationFactor) }}
+            {{- range $i := until $partitions }}
+            {"topic":"{{ $topic.name }}","partition":{{ $i }},"replicas":[{{- range $j := until $replicas }}{{ $j }}{{- if ne $j (sub $replicas 1) }},{{- end }}{{- end }}]}{{- if ne $i (sub $partitions 1) }},{{- end }}
+            {{- end }}
+            ]}
+            EOF
+            kafka-reassign-partitions --zookeeper $ZOOKEEPER_ADDRESS --reassignment-json-file {{ $topic.name }}-increase-replication-factor.json --execute
+            kafka-reassign-partitions --zookeeper $ZOOKEEPER_ADDRESS --reassignment-json-file {{ $topic.name }}-increase-replication-factor.json --verify
+            {{- else if and $topic.partitions $topic.replicationFactor }}
+            kafka-topics --zookeeper $ZOOKEEPER_ADDRESS --create --if-not-exists --force --topic {{ $topic.name }} --partitions {{ $topic.partitions }} --replication-factor {{ $topic.replicationFactor }}
+            {{- else if $topic.partitions }}
+            kafka-topics --zookeeper $ZOOKEEPER_ADDRESS --alter --force --topic {{ $topic.name }} --partitions {{ $topic.partitions }} || true
+            {{- end }}
+            {{- if $topic.defaultConfig }}
+            kafka-configs --zookeeper $ZOOKEEPER_ADDRESS --entity-type topics --entity-name {{ $topic.name }} --alter --force --delete-config {{ nospace $topic.defaultConfig }} || true
+            {{- end }}
+            {{- if $topic.config }}
+            kafka-configs --zookeeper $ZOOKEEPER_ADDRESS --entity-type topics --entity-name {{ $topic.name }} --alter --force --add-config {{ nospace $topic.config }}
+            {{- end }}
+            kafka-configs --zookeeper $ZOOKEEPER_ADDRESS --entity-type topics --entity-name {{ $topic.name }} --describe
+            {{- if $topic.acls }}
+            {{- range $a, $acl := $topic.acls }}
+            {{ if and $acl.user $acl.operations }}
+            kafka-acls --authorizer-properties zookeeper.connect={{ $zk }} --force --add --allow-principal User:{{ $acl.user }}{{- range $operation := $acl.operations }} --operation {{ $operation }} {{- end }} --topic {{ $topic.name }} {{ $topic.extraParams }}
+            {{- end -}}
+            {{- end -}}
+            {{- end -}}
+            {{- end -}}
+            {{- end -}}
