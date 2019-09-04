@@ -35,19 +35,21 @@ spec:
             zookeeper-shell $ZOOKEEPER_ADDRESS ls /brokers/ids 2> /dev/null | tail -1 | sed -e 's;[^0-9 ];;g' | wc -w
             }
             echo "Applying runtime configuration..."
-            {{- range $n, $topic := .Values.topics }}
-            echo Need at least {{ $topic.replicationFactor }} brokers for topic {{ $topic.name }}
-            while (( $(broker_count) < "{{ $topic.replicationFactor }}" ))
+            {{- $defaultReplicationFactor := index .Values.configurationOverrides "default.replication.factor" -}}
+            {{- range $n, $topic := .Values.topics -}}
+            {{- $currentReplicationFactor := default $defaultReplicationFactor $topic.replicationFactor }}
+            echo Need at least {{ $currentReplicationFactor }} brokers for topic {{ $topic.name }}
+            while (( $(broker_count) < "{{ $currentReplicationFactor }}" ))
             do
             echo "Waiting for more brokers..."
             sleep $SLEEP_INTERVAL
             done
             echo Brokers are ready!
-            {{- if and $topic.partitions $topic.replicationFactor $topic.reassignPartitions }}
+            {{- if and $topic.partitions $currentReplicationFactor $topic.reassignPartitions }}
             cat << EOF > {{ $topic.name }}-increase-replication-factor.json
             {"version":1, "partitions":[
             {{- $partitions := (int $topic.partitions) }}
-            {{- $replicas := (int $topic.replicationFactor) }}
+            {{- $replicas := (int $currentReplicationFactor) }}
             {{- range $i := until $partitions }}
             {"topic":"{{ $topic.name }}","partition":{{ $i }},"replicas":[{{- range $j := until $replicas }}{{ $j }}{{- if ne $j (sub $replicas 1) }},{{- end }}{{- end }}]}{{- if ne $i (sub $partitions 1) }},{{- end }}
             {{- end }}
@@ -55,8 +57,8 @@ spec:
             EOF
             kafka-reassign-partitions --zookeeper $ZOOKEEPER_ADDRESS --reassignment-json-file {{ $topic.name }}-increase-replication-factor.json --execute
             kafka-reassign-partitions --zookeeper $ZOOKEEPER_ADDRESS --reassignment-json-file {{ $topic.name }}-increase-replication-factor.json --verify
-            {{- else if and $topic.partitions $topic.replicationFactor }}
-            kafka-topics --zookeeper $ZOOKEEPER_ADDRESS --create --if-not-exists --force --topic {{ $topic.name }} --partitions {{ $topic.partitions }} --replication-factor {{ $topic.replicationFactor }}
+            {{- else if and $topic.partitions $currentReplicationFactor }}
+            kafka-topics --zookeeper $ZOOKEEPER_ADDRESS --create --if-not-exists --force --topic {{ $topic.name }} --partitions {{ $topic.partitions }} --replication-factor {{ $currentReplicationFactor }}
             {{- else if $topic.partitions }}
             kafka-topics --zookeeper $ZOOKEEPER_ADDRESS --alter --force --topic {{ $topic.name }} --partitions {{ $topic.partitions }} || true
             {{- end }}
