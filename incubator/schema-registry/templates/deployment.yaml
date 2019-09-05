@@ -25,8 +25,45 @@ spec:
       {{- end }}
       {{- end }}
     spec:
-    {{- if .Values.sasl.scram.enabled }}
       initContainers:
+      - name: init-brokers
+        image: "confluentinc/cp-kafka:4.1.3"
+        env:
+          - name: ZOOKEEPER_ADDRESS
+            value: {{ .Values.init.zookeeper.address | quote }}
+          - name: ZOOKEEPER_PATH
+            value: {{ printf "/%s" uuidv4 | quote }}
+          - name: MIN_BROKERS
+            value: {{ .Values.init.minBrokers | quote }}
+          - name: SLEEP_INTERVAL
+            value: "5"
+        command:
+          - bash
+          - -c
+          - |
+            check_zookeeper() {
+            zookeeper-shell $ZOOKEEPER_ADDRESS create $ZOOKEEPER_PATH null \
+            > /dev/null 2>&1 && \
+            zookeeper-shell $ZOOKEEPER_ADDRESS delete $ZOOKEEPER_PATH \
+            > /dev/null 2>&1
+            }
+            broker_count() {
+            zookeeper-shell $ZOOKEEPER_ADDRESS ls /brokers/ids 2> /dev/null | tail -1 | sed -e 's;[^0-9 ];;g' | wc -w
+            }
+            until check_zookeeper
+            do
+            echo "Waiting for Zookeeper..."
+            sleep $SLEEP_INTERVAL
+            done
+            echo "Zookeeper is ready!"
+            echo Need at least $MIN_BROKERS brokers for schemas topic
+            while (( $(broker_count) < $MIN_BROKERS ))
+            do
+            echo "Waiting for more brokers..."
+            sleep $SLEEP_INTERVAL
+            done
+            echo Brokers are ready!
+      {{- if .Values.sasl.scram.enabled }}
       ## ref: https://github.com/Yolean/kubernetes-kafka/blob/master/kafka/50kafka.yml
       - name: init-sasl
         image: "{{ .Values.sasl.scram.init.image }}:{{ .Values.sasl.scram.init.imageTag }}"
